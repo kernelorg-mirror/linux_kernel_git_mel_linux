@@ -21,6 +21,19 @@ struct pagevec {
 	struct page *pages[PAGEVEC_SIZE];
 };
 
+struct pagevec_large_header {
+	unsigned long nr;
+	spinlock_t lock;
+} ____cacheline_aligned;
+
+#define PAGEVEC_LARGE_SIZE_BYTES (PAGE_SIZE - sizeof(struct pagevec_large_header))
+#define PAGEVEC_LARGE_SIZE (PAGEVEC_LARGE_SIZE_BYTES / sizeof(struct page *))
+
+struct pagevec_large {
+	struct pagevec_large_header header;
+	struct page *pages[PAGEVEC_LARGE_SIZE];
+};
+
 void __pagevec_release(struct pagevec *pvec);
 void __pagevec_lru_add(struct pagevec *pvec);
 unsigned pagevec_lookup_entries(struct pagevec *pvec,
@@ -86,4 +99,29 @@ static inline void pagevec_release(struct pagevec *pvec)
 		__pagevec_release(pvec);
 }
 
+static inline void pagevec_large_init(struct pagevec_large *pvec)
+{
+	pvec->header.nr = 0;
+	spin_lock_init(&pvec->header.lock);
+}
+
+static inline unsigned pagevec_large_space(struct pagevec_large *pvec)
+{
+	return PAGEVEC_LARGE_SIZE - pvec->header.nr;
+}
+
+static inline unsigned pagevec_large_add(struct pagevec_large *pvec,
+					 struct page *page)
+{
+	pvec->pages[pvec->header.nr++] = page;
+	return pagevec_large_space(pvec);
+}
+
+static inline struct page *pagevec_large_sub(struct pagevec_large *pvec)
+{
+	if (!pvec->header.nr)
+		return NULL;
+
+	return pvec->pages[--pvec->header.nr];
+}
 #endif /* _LINUX_PAGEVEC_H */
