@@ -453,6 +453,9 @@ struct zone {
 	seqlock_t		span_seqlock;
 #endif
 
+	/* pagevec of patches reserved for IRQ usage */
+	struct pagevec_large	*irq_pvec;
+
 	int initialized;
 
 	/* Write-intensive fields used from the page allocator */

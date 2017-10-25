@@ -2772,10 +2772,8 @@ static void free_unref_page_commit(struct page *page, unsigned long pfn)
 	}
 }
 
-static inline void irq_free_page(struct page *page)
-{
-	__free_pages_ok(page, 0);
-}
+/* Forward-declaration to share code between irq pagevec and pcpu allocators */
+static inline void irq_free_page(struct page *page);
 
 /*
  * Free a 0-order page
@@ -3008,6 +3006,158 @@ static struct page *pcpu_alloc_page(struct zone *preferred_zone,
 }
 
 /*
+ * Batch sizes that determine how much to refill and drain the irq pagevec.
+ * These could have been based on zone sizes but there is no data on whether
+ * the same scaling is appropriate. Power-of-two-off-by-one batch sizes are
+ * picked for the reasons specified in zone_batchsize.
+ */
+#define BUDDY_PVEC_DRAIN_BATCH 127
+#define BUDDY_PVEC_ALLOC_BATCH 63
+
+static bool init_zone_irq_pvec(struct zone *zone)
+{
+	unsigned long flags;
+	struct page *page;
+
+	page = rmqueue_buddy(zone, zone, 0, ALLOC_NO_WATERMARKS, MIGRATE_UNMOVABLE);
+	if (WARN_ON_ONCE(!page))
+		return false;
+
+	prep_new_page(page, 0, GFP_KERNEL, ALLOC_NO_WATERMARKS);
+
+	/*
+	 * Init is rare so reuse zone->lock to protect zone->irq_pvec. This
+	 * is IRQ context so saving/restoring flags is unnecessary.
+	 */
+	spin_lock_irqsave(&zone->lock, flags);
+	if (!zone->irq_pvec) {
+		zone->irq_pvec = page_address(page);
+		pagevec_large_init(zone->irq_pvec);
+	} else {
+		__free_one_page(page, page_to_pfn(page), zone, 0, MIGRATE_UNMOVABLE);
+	}
+	spin_unlock_irqrestore(&zone->lock, flags);
+	return true;
+}
+
+static void drain_irq_pvec(struct pagevec_large *pvec, struct zone *zone,
+				int count)
+{
+	unsigned long flags;
+	struct page *page;
+	bool isolated_pageblocks = has_isolate_pageblock(zone);
+
+	spin_lock_irqsave(&zone->lock, flags);
+	while (count--) {
+		int mt;
+
+		page = pagevec_large_sub(pvec);
+		if (!page)
+			break;
+
+		if (unlikely(bulkfree_pcp_prepare(page)))
+			continue;
+
+		mt = MIGRATE_UNMOVABLE;
+		if (unlikely(isolated_pageblocks))
+			mt = get_pageblock_migratetype(page);
+
+		__free_one_page(page, page_to_pfn(page), zone, 0, mt);
+
+		/*
+		 * Note, potentially misleading tracepoint but a separate
+		 * one may be overkill in terms of analysing allocator
+		 * behaviour.
+		 */
+		trace_mm_page_pcpu_drain(page, 0, mt);
+	}
+	spin_unlock_irqrestore(&zone->lock, flags);
+}
+
+/* Free a single page to the irq pagevec */
+static inline void irq_free_page(struct page *page)
+{
+	unsigned long flags;
+	struct zone *zone = page_zone(page);
+	struct pagevec_large *pvec;
+	int migratetype;
+
+	migratetype = get_pcppage_migratetype(page);
+	__count_vm_event(PGFREE);
+
+	/*
+	 * Free pages from !unmovable blocks back to the allocator. Init
+	 * the IRQ pvec if necessary and warn if that fails which is
+	 * highly unlikely but recoverable.
+	 */
+	if (migratetype != MIGRATE_UNMOVABLE ||
+	    (unlikely(!zone->irq_pvec) && WARN_ON(!init_zone_irq_pvec(zone)))) {
+		free_one_page(zone, page, page_to_pfn(page), 0,
+				get_pcppage_migratetype(page));
+		return;
+	}
+
+	BUILD_BUG_ON(BUDDY_PVEC_DRAIN_BATCH >= PAGEVEC_LARGE_SIZE);
+	pvec = zone->irq_pvec;
+	spin_lock_irqsave(&pvec->header.lock, flags);
+	if (!pagevec_large_add(pvec, page))
+		drain_irq_pvec(pvec, zone, BUDDY_PVEC_DRAIN_BATCH);
+
+	spin_unlock_irqrestore(&pvec->header.lock, flags);
+}
+
+/* Remove a single page from the irq pagevec */
+static struct page *irq_pvec_rmqueue(struct zone *preferred_zone,
+			struct zone *zone)
+{
+	unsigned long flags;
+	struct pagevec_large *pvec = zone->irq_pvec;
+	struct page *page;
+
+	spin_lock_irqsave(&pvec->header.lock, flags);
+	page = pagevec_large_sub(pvec);
+	if (!page) {
+		/* Refill the pvec if there is none available */
+		struct page *list_page;
+		LIST_HEAD(list);
+
+		/*
+		 * Add the remainer to the pagevec. It should be impossible
+		 * for the pagevec to fill as it was empty when locked and
+		 * the batch size will not exceed the capacity. It could
+		 * be handled with drain_irq_pvec but keep that function
+		 * inlined in the free path, warn and leak the page if
+		 * the impossible should happen.
+		 */
+		rmqueue_bulk(zone, 0, BUDDY_PVEC_ALLOC_BATCH, &list, MIGRATE_UNMOVABLE);
+		while (!list_empty(&list)) {
+			list_page = list_first_entry(&list, struct page, lru);
+			list_del(&list_page->lru);
+			if (WARN_ON(!pagevec_large_add(pvec, list_page)))
+				pagevec_large_sub(pvec);
+		}
+		page = pagevec_large_sub(pvec);
+	}
+
+	if (page) {
+		 __count_zid_vm_events(PGALLOC, page_zonenum(page), 1);
+		zone_statistics(preferred_zone, zone);
+	}
+
+	spin_unlock_irqrestore(&pvec->header.lock, flags);
+	return page;
+}
+
+static struct page *irq_alloc_page(struct zone *preferred_zone,
+				struct zone *zone)
+{
+	if (unlikely(!zone->irq_pvec) && !init_zone_irq_pvec(zone))
+		return NULL;
+
+	return irq_pvec_rmqueue(preferred_zone, zone);
+}
+
+/*
  * Allocate a page from the given zone. Use pcplists for order-0 allocations.
  */
 static inline
@@ -3023,7 +3173,7 @@ struct page *rmqueue(struct zone *preferred_zone,
 			page = pcpu_alloc_page(preferred_zone, zone, order,
 					gfp_flags, migratetype);
 		} else {
-			page = NULL;
+			page = irq_alloc_page(preferred_zone, zone);
 		}
 		if (page)
 			goto out;
