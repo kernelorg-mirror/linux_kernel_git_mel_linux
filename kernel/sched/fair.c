@@ -6064,6 +6064,7 @@ static inline int find_idlest_cpu(struct sched_domain *sd, struct task_struct *p
 
 static inline int __select_idle_cpu(int cpu, struct task_struct *p)
 {
+	schedstat_inc(this_rq()->sis_scanned);
 	if ((available_idle_cpu(cpu) || sched_idle_cpu(cpu)) &&
 	    sched_cpu_cookie_match(cpu_rq(cpu), p))
 		return cpu;
@@ -6138,6 +6139,7 @@ static int select_idle_core(struct task_struct *p, int core, struct cpumask *cpu
 		return __select_idle_cpu(core, p);
 
 	for_each_cpu(cpu, cpu_smt_mask(core)) {
+		schedstat_inc(this_rq()->sis_scanned);
 		if (!available_idle_cpu(cpu)) {
 			idle = false;
 			if (*idle_cpu == -1) {
@@ -6168,6 +6170,7 @@ static int select_idle_smt(struct task_struct *p, struct sched_domain *sd, int t
 	int cpu;
 
 	for_each_cpu(cpu, cpu_smt_mask(target)) {
+		schedstat_inc(this_rq()->sis_scanned);
 		if (!cpumask_test_cpu(cpu, p->cpus_ptr) ||
 		    !cpumask_test_cpu(cpu, sched_domain_span(sd)))
 			continue;
@@ -6334,6 +6337,15 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	unsigned long task_util;
 	int i, recent_used_cpu;
 
+	schedstat_inc(this_rq()->sis_search);
+
+	/*
+	 * Checking if prev, target and recent is treated as one scan. A
+	 * perfect hit on one of those is considered 100% efficiency.
+	 * Further scanning impairs efficiency.
+	 */
+	schedstat_inc(this_rq()->sis_scanned);
+
 	/*
 	 * On asymmetric system, update task utilization because we will check
 	 * that the task fits with cpu's capacity.
@@ -6414,6 +6426,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	if (!sd)
 		return target;
 
+	schedstat_inc(this_rq()->sis_domain_search);
 	if (sched_smt_active()) {
 		has_idle_core = test_idle_cores(target, false);
 
@@ -6428,6 +6441,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	if ((unsigned)i < nr_cpumask_bits)
 		return i;
 
+	schedstat_inc(this_rq()->sis_failed);
 	return target;
 }
 
