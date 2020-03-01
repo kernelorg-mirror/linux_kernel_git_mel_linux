@@ -742,6 +742,8 @@ do {									\
 		P(sis_domain_search);
 		P(sis_scanned);
 		P(sis_failed);
+		P(sis_recent_hit);
+		P(sis_recent_miss);
 	}
 #undef P
 
