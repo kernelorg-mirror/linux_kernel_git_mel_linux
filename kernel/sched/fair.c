@@ -6267,6 +6267,10 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 	}
 
 	for_each_cpu_wrap(cpu, cpus, target) {
+		/* Check if busy target is in the idle cpu mask */
+		if (cpu == target)
+			cpumask_clear_cpu(target, sds_idle_cpus(sd->shared));
+
 		if (has_idle_core) {
 			i = select_idle_core(p, cpu, cpus, &idle_cpu);
 			if ((unsigned int)i < nr_cpumask_bits)
