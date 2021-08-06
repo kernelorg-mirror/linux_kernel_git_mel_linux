@@ -3493,9 +3493,17 @@ out:
 	rcu_read_unlock();
 }
 
+DEFINE_STATIC_KEY_FALSE(sched_prefer_node_locality);
+
+void sched_enable_node_locality(void)
+{
+	if (!static_key_enabled(&sched_prefer_node_locality))
+		static_branch_enable(&sched_prefer_node_locality);
+}
+
 bool cpus_share_locality(int this_cpu, int that_cpu)
 {
-	return cpus_share_cache(this_cpu, that_cpu);
+	return __cpus_share_locality(this_cpu, that_cpu);
 }
 
 static inline bool ttwu_queue_cond(int cpu, int wake_flags)

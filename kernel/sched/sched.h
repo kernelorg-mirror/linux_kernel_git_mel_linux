@@ -1773,9 +1773,24 @@ DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_packing);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_cpucapacity);
 extern struct static_key_false sched_asym_cpucapacity;
 
+DECLARE_STATIC_KEY_FALSE(sched_prefer_node_locality);
+
 static inline bool cpus_share_cache(int this_cpu, int that_cpu)
 {
 	return per_cpu(sd_llc_id, this_cpu) == per_cpu(sd_llc_id, that_cpu);
+}
+
+static inline bool cpus_share_local_node(int this_cpu, int that_cpu)
+{
+	return cpu_to_node(this_cpu) == cpu_to_node(that_cpu);
+}
+
+static inline bool __cpus_share_locality(int this_cpu, int that_cpu)
+{
+	if (static_branch_unlikely(&sched_prefer_node_locality))
+		return cpus_share_local_node(this_cpu, that_cpu);
+
+	return cpus_share_cache(this_cpu, that_cpu);
 }
 
 struct sched_group_capacity {

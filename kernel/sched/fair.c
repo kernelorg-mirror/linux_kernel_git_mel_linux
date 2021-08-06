@@ -6214,12 +6214,18 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 	int this = smp_processor_id();
 	struct sched_domain *this_sd;
 	u64 time = 0;
+	bool retry_fallback = true;
 
 	this_sd = rcu_dereference(*this_cpu_ptr(&sd_llc));
 	if (!this_sd)
 		return -1;
 
 	cpumask_and(cpus, sched_domain_span(sd), p->cpus_ptr);
+
+fallback_node:
+	if (static_branch_unlikely(&sched_prefer_node_locality) &&
+	    cpu_rq(target)->nr_running > 1)
+		retry_fallback = false;
 
 	if (sched_feat(SIS_PROP) && !has_idle_core) {
 		u64 avg_cost, avg_idle, span_avg;
@@ -6257,7 +6263,7 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 
 		} else {
 			if (!--nr)
-				return -1;
+				goto out;
 			idle_cpu = __select_idle_cpu(cpu, p);
 			if ((unsigned int)idle_cpu < nr_cpumask_bits)
 				break;
@@ -6277,6 +6283,18 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 		this_rq->wake_avg_idle -= min(this_rq->wake_avg_idle, time);
 
 		update_avg(&this_sd->avg_scan_cost, time);
+	}
+
+out:
+	if (static_branch_unlikely(&sched_prefer_node_locality)) {
+		if (idle_cpu == -1 && retry_fallback) {
+			cpumask_and(cpus, cpumask_of_node(cpu_to_node(target)), p->cpus_ptr);
+			target = cpumask_last(sched_domain_span(sd));
+			target = cpumask_next_wrap(target + 1, cpus, target, false);
+			has_idle_core = test_idle_cores(target, false);
+			retry_fallback = false;
+			goto fallback_node;
+		}
 	}
 
 	return idle_cpu;
