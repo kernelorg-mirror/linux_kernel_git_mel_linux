@@ -900,6 +900,15 @@ static void init_amd_zn(struct cpuinfo_x86 *c)
 	 */
 	if (!cpu_has(c, X86_FEATURE_HYPERVISOR) && !cpu_has(c, X86_FEATURE_CPB))
 		set_cpu_cap(c, X86_FEATURE_CPB);
+
+	/*
+	 * Prefer memory locality over LLC locality on Zen3 when searching
+	 * for CPUs to wake tasks on.
+	 */
+	if (c->x86 == 0x19) {
+		printk("AMD EPYC 3 selecting node locality\n");
+		sched_enable_node_locality();
+	}
 }
 
 static void init_amd(struct cpuinfo_x86 *c)

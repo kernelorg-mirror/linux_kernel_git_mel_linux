@@ -6224,7 +6224,7 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 
 fallback_node:
 	if (static_branch_unlikely(&sched_prefer_node_locality) &&
-	    cpu_rq(target)->nr_running > 1)
+	    cpu_rq(target)->nr_running > 2)
 		retry_fallback = false;
 
 	if (sched_feat(SIS_PROP) && !has_idle_core) {
@@ -6289,11 +6289,13 @@ out:
 	if (static_branch_unlikely(&sched_prefer_node_locality)) {
 		if (idle_cpu == -1 && retry_fallback) {
 			cpumask_and(cpus, cpumask_of_node(cpu_to_node(target)), p->cpus_ptr);
-			target = cpumask_last(sched_domain_span(sd));
-			target = cpumask_next_wrap(target + 1, cpus, target, false);
-			has_idle_core = test_idle_cores(target, false);
-			retry_fallback = false;
-			goto fallback_node;
+			cpumask_andnot(cpus, cpus, sched_domain_span(sd));
+			target = cpumask_next_wrap(target, cpus, target + 1, false);
+			if (target < nr_cpumask_bits) {
+				has_idle_core = test_idle_cores(target, false);
+				retry_fallback = false;
+				goto fallback_node;
+			}
 		}
 	}
 
