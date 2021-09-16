@@ -3765,6 +3765,16 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 	trace_mm_vmscan_memcg_reclaim_end(nr_reclaimed);
 	set_task_reclaim_state(current, NULL);
 
+	if (!nr_reclaimed) {
+		struct zoneref *z;
+		pg_data_t *pgdat;
+
+		z = first_zones_zonelist(zonelist, sc.reclaim_idx, sc.nodemask);
+		pgdat = zonelist_zone(z)->zone_pgdat;
+
+		reclaim_throttle(pgdat, VMSCAN_THROTTLE_NOPROGRESS, HZ/10);
+	}
+
 	return nr_reclaimed;
 }
 #endif
