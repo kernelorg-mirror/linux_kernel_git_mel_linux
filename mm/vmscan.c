@@ -1038,6 +1038,8 @@ void reclaim_throttle(pg_data_t *pgdat, enum vmscan_throttle_state reason)
 	 */
 	switch(reason) {
 	case VMSCAN_THROTTLE_NOPROGRESS:
+		timeout = HZ/2;
+		break;
 	case VMSCAN_THROTTLE_WRITEBACK:
 		timeout = HZ/10;
 		break;
