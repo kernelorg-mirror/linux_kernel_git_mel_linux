@@ -6265,17 +6265,14 @@ static inline int select_idle_smt(struct task_struct *p, struct sched_domain *sd
 
 /*
  * Scan the LLC domain for idle CPUs; this is dynamically regulated by
- * comparing the average scan cost (tracked in sd->avg_scan_cost) against the
- * average idle time for this rq (as found in rq->avg_idle).
+ * the success or failure of previous scans;
  */
 static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool has_idle_core, int target)
 {
 	struct cpumask *cpus = this_cpu_cpumask_var_ptr(select_idle_mask);
 	int i, cpu, idle_cpu = -1, nr = INT_MAX;
-	struct rq *this_rq = this_rq();
-	int this = smp_processor_id();
 	struct sched_domain *this_sd;
-	u64 time = 0;
+	int depth = 0;
 
 	this_sd = rcu_dereference(*this_cpu_ptr(&sd_llc));
 	if (!this_sd)
@@ -6283,39 +6280,21 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 
 	cpumask_and(cpus, sched_domain_span(sd), p->cpus_ptr);
 
-	if (sched_feat(SIS_PROP)) {
-		u64 avg_cost, avg_idle, span_avg;
-		unsigned long now = jiffies;
-
-		/*
-		 * If we're busy, the assumption that the last idle period
-		 * predicts the future is flawed; age away the remaining
-		 * predicted idle time.
-		 */
-		if (unlikely(this_rq->wake_stamp < now)) {
-			while (this_rq->wake_stamp < now && this_rq->wake_avg_idle) {
-				this_rq->wake_stamp++;
-				this_rq->wake_avg_idle >>= 1;
-			}
-		}
-
-		avg_idle = this_rq->wake_avg_idle;
-		avg_cost = this_sd->avg_scan_cost + 1;
-
-		span_avg = sd->span_weight * avg_idle;
-		if (span_avg > sis_min_cores * avg_cost)
-			nr = div_u64(span_avg, avg_cost);
-		else
-			nr = sis_min_cores;
+	if (sched_feat(SIS_DEPTH)) {
+		depth = min_t(int, this_sd->sis_scan_depth, nr);
 
 		if (!has_idle_core)
 			nr *= sched_smt_weight;
-		time = cpu_clock(this);
+		nr = depth;
 	}
 
+	cpumask_and(cpus, sched_domain_span(sd), p->cpus_ptr);
+
 	for_each_cpu_wrap(cpu, cpus, target + 1) {
-		if (--nr < 0)
+		if (--nr < 0) {
+			depth = clamp(depth - 1, 1, sis_min_cores * sched_smt_weight);
 			break;
+		}
 
 		if (has_idle_core) {
 			i = select_idle_core(p, cpu, cpus, &idle_cpu);
@@ -6328,21 +6307,14 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 		}
 	}
 
-	if ((unsigned int)idle_cpu < nr_cpumask_bits) {
-		if (has_idle_core)
-			set_idle_cores(target, false);
+	if ((unsigned int)idle_cpu < nr_cpumask_bits && has_idle_core)
+		set_idle_cores(target, false);
 
-		if (sched_feat(SIS_PROP)) {
-			time = cpu_clock(this) - time;
-
-			/*
-			 * Account for the scan cost of wakeups against the average
-			 * idle time.
-			 */
-			this_rq->wake_avg_idle -= min(this_rq->wake_avg_idle, time);
-
-			update_avg(&this_sd->avg_scan_cost, time);
-		}
+	if (sched_feat(SIS_DEPTH)) {
+		if (idle_cpu)
+			depth = min_t(int, depth + 1, sd->span_weight / sched_smt_weight);
+		if (this_sd->sis_scan_depth != depth)
+			this_sd->sis_scan_depth = depth;
 	}
 
 	return idle_cpu;
