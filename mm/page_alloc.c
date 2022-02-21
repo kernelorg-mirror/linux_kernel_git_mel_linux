@@ -1484,7 +1484,7 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 	isolated_pageblocks = has_isolate_pageblock(zone);
 
 	while (count > 0) {
-		struct list_head *list;
+		struct llist_head *list;
 		int nr_pages;
 
 		/* Remove pages from lists in a round-robin fashion. */
@@ -1492,7 +1492,7 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 			if (++pindex > max_pindex)
 				pindex = min_pindex;
 			list = &pcp->lists[pindex];
-			if (!list_empty(list))
+			if (!llist_empty(list))
 				break;
 
 			if (pindex == max_pindex)
@@ -1505,13 +1505,13 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 		nr_pages = 1 << order;
 		BUILD_BUG_ON(MAX_ORDER >= (1<<NR_PCP_ORDER_WIDTH));
 		do {
+			struct llist_node *lnode;
 			int mt;
 
-			page = list_last_entry(list, struct page, lru);
-			mt = get_pcppage_migratetype(page);
-
 			/* must delete to avoid corrupting pcp list */
-			list_del(&page->pcp_list);
+			lnode = llist_del_first(list);
+			page = llist_entry(lnode, struct page, pcp_list);
+			INIT_LIST_HEAD(&page->buddy_list);
 			count -= nr_pages;
 			pcp->count -= nr_pages;
 
@@ -1519,6 +1519,7 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 				continue;
 
 			/* MIGRATE_ISOLATE page should not go to pcplists */
+			mt = get_pcppage_migratetype(page);
 			VM_BUG_ON_PAGE(is_migrate_isolate(mt), page);
 			/* Pageblock could have been isolated meanwhile */
 			if (unlikely(isolated_pageblocks))
@@ -1526,7 +1527,7 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 
 			__free_one_page(page, page_to_pfn(page), zone, order, mt, FPI_NONE);
 			trace_mm_page_pcpu_drain(page, order, mt);
-		} while (count > 0 && !list_empty(list));
+		} while (count > 0 && !llist_empty(list));
 	}
 
 	spin_unlock_irqrestore(&zone->lock, flags);
@@ -3004,15 +3005,17 @@ out:
  * Returns the number of new pages which were placed at *list.
  */
 static int rmqueue_bulk(struct zone *zone, unsigned int order,
-			unsigned long count, struct list_head *list,
+			unsigned long count, struct llist_head *list,
 			int migratetype, unsigned int alloc_flags)
 {
 	unsigned long flags;
 	int i, allocated = 0;
+	struct page *page;
+	LIST_HEAD(tmp_list);
 
 	spin_lock_irqsave(&zone->lock, flags);
 	for (i = 0; i < count; ++i) {
-		struct page *page = __rmqueue(zone, order, migratetype,
+		page = __rmqueue(zone, order, migratetype,
 								alloc_flags);
 		if (unlikely(page == NULL))
 			break;
@@ -3030,11 +3033,17 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 		 * for IO devices that can merge IO requests if the physical
 		 * pages are ordered properly.
 		 */
-		list_add_tail(&page->pcp_list, list);
+		list_add_tail(&page->buddy_list, &tmp_list);
 		allocated++;
 		if (is_migrate_cma(get_pcppage_migratetype(page)))
 			__mod_zone_page_state(zone, NR_FREE_CMA_PAGES,
 					      -(1 << order));
+	}
+
+	while (!list_empty(&tmp_list)) {
+		page = lru_to_page(&tmp_list);
+		list_del(&page->buddy_list);
+		llist_add(&page->pcp_list, list);
 	}
 
 	/*
@@ -3330,7 +3339,7 @@ static bool free_unref_page_commit(struct page *page, int migratetype,
 	if (!locked && !spin_trylock(&pcp->lock))
 		return false;
 
-	list_add(&page->pcp_list, &pcp->lists[pindex]);
+	llist_add(&page->pcp_list, &pcp->lists[pindex]);
 	pcp->count += 1 << order;
 
 	/*
@@ -3654,7 +3663,7 @@ struct page *__rmqueue_pcplist(struct zone *zone, unsigned int order,
 			int migratetype,
 			unsigned int alloc_flags,
 			struct per_cpu_pages *pcp,
-			struct list_head *list,
+			struct llist_head *list,
 			bool locked)
 {
 	struct page *page;
@@ -3668,7 +3677,9 @@ struct page *__rmqueue_pcplist(struct zone *zone, unsigned int order,
 		return NULL;
 
 	do {
-		if (list_empty(list)) {
+		struct llist_node *lnode;
+
+		if (llist_empty(list)) {
 			int batch = READ_ONCE(pcp->batch);
 			int alloced;
 
@@ -3686,14 +3697,15 @@ struct page *__rmqueue_pcplist(struct zone *zone, unsigned int order,
 					migratetype, alloc_flags);
 
 			pcp->count += alloced << order;
-			if (unlikely(list_empty(list))) {
+			if (unlikely(llist_empty(list))) {
 				page = NULL;
 				goto out;
 			}
 		}
 
-		page = list_first_entry(list, struct page, lru);
-		list_del(&page->pcp_list);
+		lnode = llist_del_first(list);
+		page = llist_entry(lnode, struct page, pcp_list);
+		INIT_LIST_HEAD(&page->lru);
 		pcp->count -= 1 << order;
 	} while (check_new_pcp(page));
 
@@ -3711,7 +3723,7 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 			unsigned int alloc_flags)
 {
 	struct per_cpu_pages *pcp;
-	struct list_head *list;
+	struct llist_head *list;
 	struct page *page;
 	unsigned long flags;
 
@@ -5245,7 +5257,7 @@ unsigned long __alloc_pages_bulk(gfp_t gfp, int preferred_nid,
 	struct zone *zone;
 	struct zoneref *z;
 	struct per_cpu_pages *pcp;
-	struct list_head *pcp_list;
+	struct llist_head *pcp_list;
 	struct alloc_context ac;
 	gfp_t alloc_gfp;
 	unsigned int alloc_flags = ALLOC_WMARK_LOW;
@@ -7009,7 +7021,7 @@ static void per_cpu_pages_init(struct per_cpu_pages *pcp, struct per_cpu_zonesta
 
 	spin_lock_init(&pcp->lock);
 	for (pindex = 0; pindex < NR_PCP_LISTS; pindex++)
-		INIT_LIST_HEAD(&pcp->lists[pindex]);
+		init_llist_head(&pcp->lists[pindex]);
 
 	/*
 	 * Set batch and high values safe for a boot pageset. A true percpu
