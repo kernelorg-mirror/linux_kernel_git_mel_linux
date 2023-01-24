@@ -2407,12 +2407,15 @@ rescan:
 			goto check_drain;
 		case ISOLATE_SUCCESS:
 			update_cached = false;
-			last_migrated_pfn = iteration_start_pfn;
+			break;
 		}
 
 		err = migrate_pages(&cc->migratepages, compaction_alloc,
 				compaction_free, (unsigned long)cc, cc->mode,
 				MR_COMPACTION, &nr_succeeded);
+
+		if (nr_succeeded)
+			last_migrated_pfn = iteration_start_pfn;
 
 		trace_mm_compaction_migratepages(cc, nr_succeeded);
 
