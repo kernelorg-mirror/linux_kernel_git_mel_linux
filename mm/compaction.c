@@ -2381,18 +2381,10 @@ compact_zone(struct compact_control *cc, struct capture_control *capc)
 		unsigned long iteration_start_pfn = cc->migrate_pfn;
 
 		/*
-		 * Avoid multiple rescans of the same pageblock which can
-		 * happen if a page cannot be isolated (dirty/writeback in
-		 * async mode) or if the migrated pages are being allocated
-		 * before the pageblock is cleared.  The first rescan will
-		 * capture the entire pageblock for migration. If it fails,
-		 * it'll be marked skip and scanning will proceed as normal.
+		 * Scan pageblock in COMPACT_CLUSTER_MAX blocks unless
+		 * migrate_pages() fails.
 		 */
 		cc->finish_pageblock = false;
-		if (pageblock_start_pfn(last_migrated_pfn) ==
-		    pageblock_start_pfn(iteration_start_pfn)) {
-			cc->finish_pageblock = true;
-		}
 
 rescan:
 		switch (isolate_migratepages(cc)) {
