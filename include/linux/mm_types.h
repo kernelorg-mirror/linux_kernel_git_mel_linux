@@ -483,12 +483,12 @@ struct vma_numab_state {
 						 * least
 						 * sysctl_numa_balancing_scan_delay
 						 */
-	unsigned long next_pid_reset;		/* Time in jiffies when
+	unsigned long pids_active_reset;	/* Time in jiffies when
 						 * access_pids is reset to
 						 * detect phase change
 						 * behaviour.
 						 */
-	unsigned long access_pids[2];		/* Approximate tracking of PIDS
+	unsigned long pids_active[2];		/* Approximate tracking of PIDS
 						 * that trapped a NUMA hinting
 						 * fault. May produce false
 						 * positives due to hash
