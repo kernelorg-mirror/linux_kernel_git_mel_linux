@@ -2928,7 +2928,7 @@ static void reset_ptenuma_scan(struct task_struct *p)
 	p->mm->numa_scan_offset = 0;
 }
 
-static bool vma_is_accessed(struct vm_area_struct *vma)
+static bool vma_is_accessed(struct mm_struct *mm, struct vm_area_struct *vma)
 {
 	unsigned long pids;
 	/*
@@ -2941,7 +2941,19 @@ static bool vma_is_accessed(struct vm_area_struct *vma)
 		return true;
 
 	pids = vma->numab_state->pids_active[0] | vma->numab_state->pids_active[1];
-	return test_bit(hash_32(current->pid, ilog2(BITS_PER_LONG)), &pids);
+	if (test_bit(hash_32(current->pid, ilog2(BITS_PER_LONG)), &pids))
+		return 1;
+
+	/*
+	 * Complete a scan that has already started regardless of PID access or
+	 * some VMAs may never be scanned in multi-threaded applications
+	 */
+	if (mm->numa_scan_offset - vma->vm_start > 0) {
+		trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_PID_IGNORED);
+		return 1;
+	}
+
+	return 0;
 }
 
 #define VMA_PID_RESET_PERIOD (4 * sysctl_numa_balancing_scan_delay)
@@ -3076,7 +3088,7 @@ static void task_numa_work(struct callback_head *work)
 		}
 
 		/* Do not scan the VMA if task has not accessed */
-		if (!vma_is_accessed(vma)) {
+		if (!vma_is_accessed(mm, vma)) {
 			trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_PID_INACTIVE);
 			continue;
 		}
