@@ -476,9 +476,33 @@ struct vma_lock {
 };
 
 struct vma_numab_state {
-	unsigned long next_scan;
-	unsigned long next_pid_reset;
-	unsigned long access_pids[2];
+	unsigned long next_scan;		/* Initialised as time in
+						 * jiffies after which VMA
+						 * should be scanned.  Delays
+						 * first scan of new VMA by at
+						 * least
+						 * sysctl_numa_balancing_scan_delay
+						 */
+	unsigned long next_pid_reset;		/* Time in jiffies when
+						 * access_pids is reset to
+						 * detect phase change
+						 * behaviour.
+						 */
+	unsigned long access_pids[2];		/* Approximate tracking of PIDS
+						 * that trapped a NUMA hinting
+						 * fault. May produce false
+						 * positives due to hash
+						 * collisions.
+						 *
+						 * [0] Previous PID tracking
+						 * [1] Current PID tracking
+						 *
+						 * Window moves after
+						 * next_pid_reset has expired
+						 * approximately every
+						 * VMA_PID_RESET_PERIOD
+						 * jiffies.
+						 */
 };
 
 /*
