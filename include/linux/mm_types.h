@@ -578,6 +578,12 @@ struct vma_numab_state {
 						 * VMA_PID_RESET_PERIOD
 						 * jiffies.
 						 */
+	int prev_scan_seq;			/* MM scan sequence ID when
+						 * the VMA was last completely
+						 * scanned. A VMA is not
+						 * eligible for scanning if
+						 * prev_scan_seq == numa_scan_seq
+						 */
 };
 
 /*
