@@ -936,6 +936,16 @@ static struct sched_entity *pick_eevdf(struct cfs_rq *cfs_rq)
 	if (cfs_rq->nr_queued == 1)
 		return curr && curr->on_rq ? curr : se;
 
+	/*
+	 * Picking the ->next buddy will affect latency but not fairness.
+	 */
+	if (sched_feat(PICK_BUDDY) &&
+	    cfs_rq->next && entity_eligible(cfs_rq, cfs_rq->next)) {
+		/* ->next will never be delayed */
+		WARN_ON_ONCE(cfs_rq->next->sched_delayed);
+		return cfs_rq->next;
+	}
+
 	if (curr && (!curr->on_rq || !entity_eligible(cfs_rq, curr)))
 		curr = NULL;
 
@@ -1203,6 +1213,83 @@ static inline bool do_preempt_short(struct cfs_rq *cfs_rq,
 		return true;
 
 	return false;
+}
+
+enum preempt_buddy_action {
+	PREEMPT_BUDDY_NONE,		/* No action on the buddy */
+	PREEMPT_BUDDY_NEXT,		/* Check next is most eligible
+					 * before rescheduling.
+					 */
+	PREEMPT_BUDDY_RESCHED,		/* Plain reschedule */
+	PREEMPT_BUDDY_IMMEDIATE		/* Remove slice protection
+					 * and reschedule
+					 */
+};
+
+static void set_next_buddy(struct sched_entity *se);
+
+static inline enum preempt_buddy_action
+do_preempt_buddy(struct rq *rq, struct cfs_rq *cfs_rq, int wake_flags,
+		 struct sched_entity *pse, struct sched_entity *se,
+		 s64 delta, bool did_short)
+{
+	bool pse_before, pse_eligible;
+
+	if (!sched_feat(NEXT_BUDDY) ||
+	    (wake_flags & WF_FORK) ||
+	    (pse->sched_delayed)) {
+		BUILD_BUG_ON(PREEMPT_BUDDY_NONE + 1 != PREEMPT_BUDDY_NEXT);
+		return PREEMPT_BUDDY_NONE + did_short;
+	}
+
+	/* Reschedule if waker is no longer eligible */
+	if (!entity_eligible(cfs_rq, se))
+		return PREEMPT_BUDDY_RESCHED;
+
+	/* Keep existing buddy if the deadline is sooner than pse */
+	if (cfs_rq->next && entity_before(cfs_rq->next, pse))
+		return PREEMPT_BUDDY_NONE;
+
+	set_next_buddy(pse);
+	pse_before = entity_before(pse, se);
+	pse_eligible = entity_eligible(cfs_rq, pse);
+
+	/*
+	 * WF_SYNC implies that waker will sleep soon but it is not enforced
+	 * because the hint is often abused or misunderstood.
+	 */
+	if ((wake_flags & (WF_TTWU|WF_SYNC)) == (WF_TTWU|WF_SYNC)) {
+		/*
+		 * WF_RQ_SELECTED implies the tasks are stacking on a
+		 * CPU. Only consider reschedule if pse deadline expires
+		 * before se.
+		 */
+		if ((wake_flags & WF_RQ_SELECTED) &&
+		    delta < sysctl_sched_migration_cost) {
+
+			if (!pse_before)
+				return PREEMPT_BUDDY_NONE;
+
+			/* Fall through to pse deadline.  */
+		}
+
+		/*
+		 * Reschedule if pse's deadline is sooner and there is a chance
+		 * that some wakeup batching has completed.
+		 */
+		if (pse_before &&
+		    delta >= (sysctl_sched_migration_cost >> 6)) {
+			return PREEMPT_BUDDY_IMMEDIATE;
+		}
+
+		return PREEMPT_BUDDY_NONE;
+	}
+
+	/* Check eligibility of buddy to start now. */
+	if (pse_before && pse_eligible)
+		return PREEMPT_BUDDY_IMMEDIATE;
+
+	return PREEMPT_BUDDY_NEXT;
 }
 
 /*
@@ -5589,16 +5676,6 @@ pick_next_entity(struct rq *rq, struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *se;
 
-	/*
-	 * Picking the ->next buddy will affect latency but not fairness.
-	 */
-	if (sched_feat(PICK_BUDDY) &&
-	    cfs_rq->next && entity_eligible(cfs_rq, cfs_rq->next)) {
-		/* ->next will never be delayed */
-		WARN_ON_ONCE(cfs_rq->next->sched_delayed);
-		return cfs_rq->next;
-	}
-
 	se = pick_eevdf(cfs_rq);
 	if (se->sched_delayed) {
 		dequeue_entities(rq, se, DEQUEUE_SLEEP | DEQUEUE_DELAYED);
@@ -7055,8 +7132,6 @@ enqueue_throttle:
 
 	hrtick_update(rq);
 }
-
-static void set_next_buddy(struct sched_entity *se);
 
 /*
  * Basically dequeue_task_fair(), except it can deal with dequeue_entity()
@@ -8767,6 +8842,8 @@ static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int 
 	struct sched_entity *se = &donor->se, *pse = &p->se;
 	struct cfs_rq *cfs_rq = task_cfs_rq(donor);
 	int cse_is_idle, pse_is_idle;
+	bool did_short;
+	s64 delta;
 
 	if (unlikely(se == pse))
 		return;
@@ -8779,10 +8856,6 @@ static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int 
 	 */
 	if (unlikely(throttled_hierarchy(cfs_rq_of(pse))))
 		return;
-
-	if (sched_feat(NEXT_BUDDY) && !(wake_flags & WF_FORK) && !pse->sched_delayed) {
-		set_next_buddy(pse);
-	}
 
 	/*
 	 * We can come here with TIF_NEED_RESCHED already set from new task
@@ -8829,6 +8902,7 @@ static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int 
 		return;
 
 	cfs_rq = cfs_rq_of(se);
+	delta = rq_clock_task(rq) - se->exec_start;
 	update_curr(cfs_rq);
 	/*
 	 * If @p has a shorter slice than current and @p is eligible, override
@@ -8837,8 +8911,23 @@ static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int 
 	 * Note that even if @p does not turn out to be the most eligible
 	 * task at this moment, current's slice protection will be lost.
 	 */
-	if (do_preempt_short(cfs_rq, pse, se))
+	did_short = do_preempt_short(cfs_rq, pse, se);
+	if (did_short)
 		cancel_protect_slice(se);
+
+	switch (do_preempt_buddy(rq, cfs_rq, wake_flags, pse, se, delta, did_short)) {
+	case PREEMPT_BUDDY_NONE:
+		return;
+		break;
+	case PREEMPT_BUDDY_IMMEDIATE:
+		cancel_protect_slice(se);
+		;;
+	case PREEMPT_BUDDY_RESCHED:
+		goto preempt;
+		break;
+	case PREEMPT_BUDDY_NEXT:
+		break;
+	}
 
 	/*
 	 * If @p has become the most eligible task, force preemption.
